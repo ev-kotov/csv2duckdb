@@ -25,25 +25,17 @@ func Import(ctx context.Context, actions ...domain.Action) (*sql.DB, error) {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
 
-	db, err := initializeDB(cfg.SavePath)
+	db, err := initDB(ctx, cfg.SavePath)
 	if err != nil {
-		return nil, fmt.Errorf("db init: %w", err)
+		return nil, fmt.Errorf("initialization: %w", err)
 	}
 
-	if err := applyOptimizations(db, cfg); err != nil {
-		err := db.Close()
-		if err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("optimizations: %w", err)
+	if err := toOptimize(ctx, db, cfg); err != nil {
+		return nil, fmt.Errorf("optimization: %w", err)
 	}
 
 	if err := importFiles(ctx, db, cfg); err != nil {
-		err := db.Close()
-		if err != nil {
-			return nil, err
-		}
-		return nil, err
+		return nil, fmt.Errorf("importing: %w", err)
 	}
 
 	parallelPostImport(ctx, db, cfg)
@@ -57,10 +49,21 @@ func Import(ctx context.Context, actions ...domain.Action) (*sql.DB, error) {
 	return db, nil
 }
 
-func initializeDB(savePath string) (*sql.DB, error) {
+func initDB(ctx context.Context, savePath string) (*sql.DB, error) {
 	db, err := sql.Open("duckdb", savePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open db: %w", err)
 	}
-	return db, db.Ping()
+
+	if err := db.PingContext(ctx); err != nil {
+		err := db.Close()
+
+		if err := db.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close db: %w", err)
+		}
+
+		return nil, fmt.Errorf("failed to ping db: %w", err)
+	}
+
+	return db, nil
 }

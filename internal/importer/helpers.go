@@ -10,30 +10,33 @@ import (
 	"github.com/ev-kotov/csv2duckdb/domain"
 )
 
-// applyOptimizations configures DuckDB with performance settings.
-func applyOptimizations(db *sql.DB, cfg *domain.Config) error {
-	// Use MemoryLimit directly as gigabytes
-	memoryLimitGB := cfg.MemoryLimit
-	if memoryLimitGB < 1 {
-		memoryLimitGB = 1 // Minimum 1GB
+func toOptimize(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
+	memoryLimit := cfg.MemoryLimit
+
+	if memoryLimit < 1 {
+		memoryLimit = 1 // Minimum 1GB
 	}
 
 	queries := []string{
-		fmt.Sprintf("SET memory_limit='%dGB'", memoryLimitGB),
+		fmt.Sprintf("SET memory_limit='%dGB'", memoryLimit),
 		"SET enable_object_cache=true",
 		fmt.Sprintf("SET preserve_insertion_order=%t", cfg.PreserveInsertionOrder),
 		fmt.Sprintf("SET enable_progress_bar=%t", cfg.ProgressBar),
 	}
 
 	for _, query := range queries {
-		if _, err := db.Exec(query); err != nil {
+		if _, err := db.ExecContext(ctx, query); err != nil {
+
+			if err := db.Close(); err != nil {
+				return fmt.Errorf("failed to close db: %w", err)
+			}
 			return fmt.Errorf("query %s: %w", query, err)
 		}
 	}
+
 	return nil
 }
 
-// importFiles processes all CSV files specified in configuration.
 func importFiles(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
 	// Group files by table name for handling same table names
 	tableGroups := make(map[string][]string)
@@ -121,6 +124,7 @@ func createIndexes(ctx context.Context, db *sql.DB, cfg *domain.Config) {
 			}
 
 			wg.Add(1)
+
 			go func(tblName, col string) {
 				defer wg.Done()
 				createIndex(ctx, db, tblName, col)
