@@ -2,7 +2,7 @@ package domain
 
 // Config holds configuration for CSV import operations.
 type Config struct {
-	ProgressBar            bool                // Show progress bar during import
+	ProgressBar            bool                // TODO: Show progress bar during import
 	Tables                 map[string]string   // Map of CSV file paths to table names
 	MemoryLimit            int                 // DuckDB memory limit in gigabytes
 	IndexedColumns         map[string][]string // Map of table names to columns for indexing

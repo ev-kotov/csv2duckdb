@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -27,18 +28,33 @@ func Import(ctx context.Context, actions ...domain.Action) (*sql.DB, error) {
 
 	db, err := initDB(ctx, cfg.SavePath)
 	if err != nil {
-		return nil, fmt.Errorf("initialization: %w", err)
+		return nil, fmt.Errorf("init data base: %w", err)
 	}
 
+	defer func() {
+		if err != nil {
+			if closeErr := db.Close(); closeErr != nil {
+				err = errors.Join(
+					fmt.Errorf("main error: %w", err),
+					fmt.Errorf("db close error: %w", closeErr),
+				)
+			}
+		}
+	}()
+
 	if err := toOptimize(ctx, db, cfg); err != nil {
-		return nil, fmt.Errorf("optimization: %w", err)
+		return nil, fmt.Errorf("optimize : %w", err)
 	}
 
 	if err := importFiles(ctx, db, cfg); err != nil {
-		return nil, fmt.Errorf("importing: %w", err)
+		return nil, fmt.Errorf("import files: %w", err)
 	}
 
-	parallelPostImport(ctx, db, cfg)
+	if len(cfg.IndexedColumns) != 0 {
+		if err = createIndexes(ctx, db, cfg); err != nil {
+			return nil, fmt.Errorf("creating indexes: %w", err)
+		}
+	}
 
 	log.Printf("CSV import completed in %v", time.Since(startTime))
 
@@ -55,14 +71,16 @@ func initDB(ctx context.Context, savePath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open db: %w", err)
 	}
 
-	if err := db.PingContext(ctx); err != nil {
-		err := db.Close()
+	if pingErr := db.PingContext(ctx); pingErr != nil {
+		pingErr = fmt.Errorf("failed to ping db: %w", pingErr)
 
-		if err := db.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close db: %w", err)
+		if closeErr := db.Close(); closeErr != nil {
+			return nil, errors.Join(
+				pingErr,
+				fmt.Errorf("failed to close db: %w", closeErr),
+			)
 		}
-
-		return nil, fmt.Errorf("failed to ping db: %w", err)
+		return nil, pingErr
 	}
 
 	return db, nil

@@ -3,6 +3,7 @@ package importer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -26,10 +27,6 @@ func toOptimize(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
 
 	for _, query := range queries {
 		if _, err := db.ExecContext(ctx, query); err != nil {
-
-			if err := db.Close(); err != nil {
-				return fmt.Errorf("failed to close db: %w", err)
-			}
 			return fmt.Errorf("query %s: %w", query, err)
 		}
 	}
@@ -38,28 +35,25 @@ func toOptimize(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
 }
 
 func importFiles(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
-	// Group files by table name for handling same table names
+
 	tableGroups := make(map[string][]string)
 	for filePath, tableName := range cfg.Tables {
 		tableGroups[tableName] = append(tableGroups[tableName], filePath)
 	}
 
-	// Process each table group
 	for tableName, filePaths := range tableGroups {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
 		if len(filePaths) == 1 {
-			// Single file for table
 			log.Printf("Importing %s -> %s", filePaths[0], tableName)
-			if err := importSingleFile(ctx, db, filePaths[0], tableName); err != nil {
+			if err := importOneFile(ctx, db, filePaths[0], tableName); err != nil {
 				return fmt.Errorf("import %s: %w", filePaths[0], err)
 			}
 		} else {
-			// Multiple files for same table - use UNION ALL
 			log.Printf("Importing %d files -> %s", len(filePaths), tableName)
-			if err := importMultipleFilesToTable(ctx, db, filePaths, tableName); err != nil {
+			if err := importSameFiles(ctx, db, filePaths, tableName); err != nil {
 				return fmt.Errorf("import to %s: %w", tableName, err)
 			}
 		}
@@ -67,8 +61,7 @@ func importFiles(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
 	return nil
 }
 
-// importSingleFile imports a single CSV file using DuckDB's read_csv_auto.
-func importSingleFile(ctx context.Context, db *sql.DB, filePath, tableName string) error {
+func importOneFile(ctx context.Context, db *sql.DB, filePath, tableName string) error {
 	query := fmt.Sprintf(`
 		CREATE OR REPLACE TABLE %s AS 
 		SELECT * FROM read_csv_auto('%s')`,
@@ -78,9 +71,7 @@ func importSingleFile(ctx context.Context, db *sql.DB, filePath, tableName strin
 	return err
 }
 
-// importMultipleFilesToTable imports multiple CSV files into single table using UNION ALL.
-func importMultipleFilesToTable(ctx context.Context, db *sql.DB, filePaths []string, tableName string) error {
-	// Build UNION ALL query for all files
+func importSameFiles(ctx context.Context, db *sql.DB, filePaths []string, tableName string) error {
 	unionQuery := ""
 	for i, filePath := range filePaths {
 		if i > 0 {
@@ -98,49 +89,56 @@ func importMultipleFilesToTable(ctx context.Context, db *sql.DB, filePaths []str
 	return err
 }
 
-// parallelPostImport executes post-import tasks like index creation.
-func parallelPostImport(ctx context.Context, db *sql.DB, cfg *domain.Config) {
+func createIndexes(ctx context.Context, db *sql.DB, cfg *domain.Config) error {
 	var wg sync.WaitGroup
 
-	if len(cfg.IndexedColumns) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			createIndexes(ctx, db, cfg)
-		}()
-	}
-
-	wg.Wait()
-}
-
-// createIndexes creates indexes on specified columns concurrently.
-func createIndexes(ctx context.Context, db *sql.DB, cfg *domain.Config) {
-	var wg sync.WaitGroup
+	errCh := make(chan error, len(cfg.IndexedColumns)*10)
 
 	for tableName, columns := range cfg.IndexedColumns {
 		for _, column := range columns {
+
 			if ctx.Err() != nil {
-				return
+				return ctx.Err()
 			}
 
 			wg.Add(1)
 
 			go func(tblName, col string) {
+
 				defer wg.Done()
-				createIndex(ctx, db, tblName, col)
+
+				if err := createIndex(ctx, db, tblName, col); err != nil {
+					errCh <- fmt.Errorf("table %s column %s: %w", tblName, col, err)
+				}
 			}(tableName, column)
 		}
 	}
 
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("index creation errors: %w", errors.Join())
+	}
+
+	return nil
 }
 
-// createIndex creates a single index on specified table and column.
-func createIndex(ctx context.Context, db *sql.DB, tableName, column string) {
+func createIndex(ctx context.Context, db *sql.DB, tableName, column string) error {
 	indexName := fmt.Sprintf("idx_%s_%s", tableName, column)
-	query := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)", indexName, tableName, column)
+
+	query := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)",
+		indexName, tableName, column)
 
 	if _, err := db.ExecContext(ctx, query); err != nil {
-		log.Printf("Failed to create index %s: %v", indexName, err)
+		return fmt.Errorf("failed to create index %s: %w", indexName, err)
 	}
+	return nil
 }
