@@ -135,6 +135,8 @@ func TestAPI_Import(t *testing.T) {
 			be.Err(t, db.Close(), nil)
 		}(db)
 
+		be.Err(t, err, nil)
+
 		var name string
 		var number int
 		var date time.Time
