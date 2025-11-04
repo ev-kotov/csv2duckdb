@@ -8,9 +8,9 @@ import (
 	"log"
 	"time"
 
+	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/ev-kotov/csv2duckdb/domain"
 	"github.com/ev-kotov/csv2duckdb/internal/config"
-	_ "github.com/marcboeker/go-duckdb"
 )
 
 // Import CSV files into DuckDB and returns database connection for queries.
